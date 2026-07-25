@@ -6,7 +6,6 @@ import heapq
 from dataclasses import dataclass
 from functools import total_ordering
 from typing import Any
-from io import BytesIO
 
 
 @dataclass
@@ -43,10 +42,10 @@ def get_huffman_tree(char_counts: dict[str, int]) -> TreeNode:
     return cur_roots[0]
 
 
-def get_prefix_code_table(tree_root: TreeNode) -> dict[str, bytes]:
+def get_prefix_code_table(tree_root: TreeNode) -> dict[str, int]:
     '''Do a DFS on the Huffman binary tree, where moving left adds a 0 bit,
     moving right adds a 1 bit. Use this to get the prefix code for each char'''
-    prefix_code_table: dict[str, bytes] = {}
+    prefix_code_table: dict[str, int] = {}
     cur_prefix = 0
 
     def traverse_from(cur_node: TreeNode) -> None:
@@ -56,11 +55,7 @@ def get_prefix_code_table(tree_root: TreeNode) -> dict[str, bytes]:
         if cur_node.left is None and cur_node.right is None:
             if cur_node.ch is None:
                 raise ValueError(f'{cur_node=} leaf, but no char')
-            num_bytes, remainder = divmod(cur_prefix.bit_length(), 8)
-            num_bytes += int(remainder)
-            num_bytes = max(num_bytes, 1)
-            prefix_code_table[cur_node.ch] = cur_prefix.to_bytes(
-                num_bytes, byteorder='big', signed=False)
+            prefix_code_table[cur_node.ch] = cur_prefix
         if cur_node.left is not None:
             cur_prefix = (cur_prefix << 1) | 0
             traverse_from(cur_node.left)
@@ -74,7 +69,7 @@ def get_prefix_code_table(tree_root: TreeNode) -> dict[str, bytes]:
     return prefix_code_table
 
 
-def huffman_encode(original: str) -> tuple[dict[str, bytes], BytesIO]:
+def huffman_encode(original: str) -> tuple[dict[str, int], str]:
     '''Given the original text, apply Huffman encoding.
     Recall the greedy algo: given subtrees containing char counts of
         groups of chars, combine the two least common char counts into a
@@ -83,18 +78,28 @@ def huffman_encode(original: str) -> tuple[dict[str, bytes], BytesIO]:
 
     Return a dict of (char, encoding) plus the overall encoding of the
     original text
-        I considered using an int + bit-shift, but that's too slow. I think
-        I need a bytes-like buffer here
 
-    Wait though...if every char gets >= 1 byte, then there's no compression
-        over the original. I need a bitwise buffer'''
+    Which particular encoding format? Some considerations:
+        I considered using an int + bit-shift, but that's too slow
+        Bytes-like buffer is fast, but each char >= 1 byte --> no compression
+        Perhaps int, read successive bits, then convert to chr once > 1 byte'''
     char_counts = Counter(original)
     tree_root = get_huffman_tree(char_counts)
     prefix_code_table = get_prefix_code_table(tree_root)
-    compressed_buffer = BytesIO()
+    compressed_chs: list[str] = []
+    cur_bits = 0
     for ch in original:
-        compressed_buffer.write(prefix_code_table[ch])
-    return prefix_code_table, compressed_buffer
+        cur_code = prefix_code_table[ch]
+        for bit_idx in range(cur_code.bit_length()-1, -1, -1):
+            if cur_bits.bit_length() == 8:
+                compressed_chs.append(chr(cur_bits))
+                cur_bits = 0
+            cur_bits = (cur_bits << 1)
+            if ((1 << bit_idx) & cur_code) > 0:
+                cur_bits |= 1
+    if cur_bits > 0:
+        compressed_chs.append(chr(cur_bits))
+    return prefix_code_table, ''.join(compressed_chs)
 
 
 def main():
@@ -106,7 +111,7 @@ def main():
     args = parser.parse_args()
     with open(args.in_fname, encoding='utf-8') as f:
         code_table, compressed_output = huffman_encode(f.read())
-        print(f'{compressed_output.tell()=}')
+        print(f'{len(compressed_output)=}')
     with open(args.out_fname, 'wb+') as f:
         pickle.dump([code_table, compressed_output], f)
 
