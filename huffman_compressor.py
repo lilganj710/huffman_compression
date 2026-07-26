@@ -6,6 +6,7 @@ import heapq
 from dataclasses import dataclass
 from functools import total_ordering
 from typing import Any
+from bitarray import bitarray, frozenbitarray
 
 
 @dataclass
@@ -26,9 +27,13 @@ class TreeNode:
     def __lt__(self, other: TreeNode) -> bool:
         return self.total_count < other.total_count
 
+    def __repr__(self) -> str:
+        return f'{self.total_count=}, {self.ch=}'
+
 
 def get_huffman_tree(char_counts: dict[str, int]) -> TreeNode:
-    '''Use the greedy algo described below to get the Huffman encoding tree'''
+    '''Use the greedy algo described below to get the Huffman encoding tree
+    Note that the first bit has to be 1, else shifts may have no effect'''
     cur_roots = [TreeNode(count, ch) for ch, count in char_counts.items()]
     heapq.heapify(cur_roots)
     while len(cur_roots) > 1:
@@ -39,37 +44,38 @@ def get_huffman_tree(char_counts: dict[str, int]) -> TreeNode:
         parent_node.left = smallest_group
         parent_node.right = next_smallest
         heapq.heappush(cur_roots, parent_node)
-    return cur_roots[0]
+    overall_parent = TreeNode(cur_roots[0].total_count)
+    overall_parent.right = cur_roots[0]
+    return overall_parent
 
 
-def get_prefix_code_table(tree_root: TreeNode) -> dict[str, int]:
+def get_prefix_code_table(tree_root: TreeNode) -> dict[str, bitarray]:
     '''Do a DFS on the Huffman binary tree, where moving left adds a 0 bit,
     moving right adds a 1 bit. Use this to get the prefix code for each char'''
-    prefix_code_table: dict[str, int] = {}
-    cur_prefix = 0
+    prefix_code_table: dict[str, bitarray] = {}
+    cur_prefix = bitarray()
 
     def traverse_from(cur_node: TreeNode) -> None:
         '''Recursively traverse from cur_node. If cur_node is a leaf,
         then save the cur_prefix in the prefix_code_table'''
-        nonlocal cur_prefix
         if cur_node.left is None and cur_node.right is None:
             if cur_node.ch is None:
                 raise ValueError(f'{cur_node=} leaf, but no char')
-            prefix_code_table[cur_node.ch] = cur_prefix
+            prefix_code_table[cur_node.ch] = cur_prefix.copy()
         if cur_node.left is not None:
-            cur_prefix = (cur_prefix << 1) | 0
+            cur_prefix.append(0)
             traverse_from(cur_node.left)
-            cur_prefix = cur_prefix >> 1
+            cur_prefix.pop()
         if cur_node.right is not None:
-            cur_prefix = (cur_prefix << 1) | 1
+            cur_prefix.append(1)
             traverse_from(cur_node.right)
-            cur_prefix = cur_prefix >> 1
+            cur_prefix.pop()
 
     traverse_from(tree_root)
     return prefix_code_table
 
 
-def huffman_encode(original: str) -> tuple[dict[str, int], str]:
+def huffman_encode(original: str) -> tuple[dict[str, bitarray], bitarray]:
     '''Given the original text, apply Huffman encoding.
     Recall the greedy algo: given subtrees containing char counts of
         groups of chars, combine the two least common char counts into a
@@ -82,24 +88,39 @@ def huffman_encode(original: str) -> tuple[dict[str, int], str]:
     Which particular encoding format? Some considerations:
         I considered using an int + bit-shift, but that's too slow
         Bytes-like buffer is fast, but each char >= 1 byte --> no compression
-        Perhaps int, read successive bits, then convert to chr once > 1 byte'''
+        Perhaps int, read successive bits, then convert to chr once > 1 byte
+        But 00001 and 001 are the same int. Perhaps a list of bits instead?
+        list of bits --> barely any compression in the final file
+    Eventually settled on the 3rd party bitarray
+        Doesn't appear to be a native bitarray in Python'''
     char_counts = Counter(original)
     tree_root = get_huffman_tree(char_counts)
     prefix_code_table = get_prefix_code_table(tree_root)
-    compressed_chs: list[str] = []
-    cur_bits = 0
+    compressed = bitarray()
     for ch in original:
-        cur_code = prefix_code_table[ch]
-        for bit_idx in range(cur_code.bit_length()-1, -1, -1):
-            if cur_bits.bit_length() == 8:
-                compressed_chs.append(chr(cur_bits))
-                cur_bits = 0
-            cur_bits = (cur_bits << 1)
-            if ((1 << bit_idx) & cur_code) > 0:
-                cur_bits |= 1
-    if cur_bits > 0:
-        compressed_chs.append(chr(cur_bits))
-    return prefix_code_table, ''.join(compressed_chs)
+        compressed.extend(prefix_code_table[ch])
+    return prefix_code_table, compressed
+
+
+def decode(compressed_fname: str) -> str:
+    '''The compressed output should be a pickled (code_table, compressed str)
+    After unpickling, I should be able to iterate through and recover the
+    original file'''
+    with open(compressed_fname, 'rb') as f:
+        code_table, compressed_output = pickle.load(f)
+        code_table: dict[str, bitarray]
+        compressed_output: bitarray
+    chs_by_prefix = {
+        frozenbitarray(code): ch for ch, code in code_table.items()}
+    uncompressed_chs: list[str] = []
+    bit_buffer = bitarray()
+    for bit in compressed_output:
+        bit_buffer.append(bit)
+        frozen_buffer = frozenbitarray(bit_buffer)
+        if frozen_buffer in chs_by_prefix:
+            uncompressed_chs.append(chs_by_prefix[frozen_buffer])
+            bit_buffer = bitarray()
+    return ''.join(uncompressed_chs)
 
 
 def main():
@@ -110,10 +131,13 @@ def main():
         '--out_fname', default='compressed_out.huf', required=False)
     args = parser.parse_args()
     with open(args.in_fname, encoding='utf-8') as f:
-        code_table, compressed_output = huffman_encode(f.read())
-        print(f'{len(compressed_output)=}')
+        og_file_text = f.read()
+    code_table, compressed_output = huffman_encode(og_file_text)
     with open(args.out_fname, 'wb+') as f:
         pickle.dump([code_table, compressed_output], f)
+    recovered_uncompressed = decode(args.out_fname)
+    print(f'{len(og_file_text)=}, {len(recovered_uncompressed)=}')
+    assert recovered_uncompressed == og_file_text
 
 
 if __name__ == '__main__':
